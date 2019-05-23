@@ -5,44 +5,42 @@ namespace Prime
 open System.Diagnostics
 open Prime
 
-/// The Chain monad. Allows the user to define a chain of operations over the world that
-/// optionally spans across a bounded number of events.
-///
-/// The following is a potentially tail-recursible representation as speculated by @tpetricek -
-/// 'w -> ('w * Either<'e -> Chain<'e, 'a, 'w>, 'a> -> 'a) -> 'a
-type [<NoComparison; NoEquality>] Chain<'e, 'a, 'w when 'w :> EventSystem<'w>> =
-    Chain of ('w -> 'w * Either<'e -> Chain<'e, 'a, 'w>, 'a>)
+/// The Chain monad - Essentially the State monad, will provide a restricted interface to keep everything safe.
+type [<NoComparison; NoEquality>] Chain<'w, 'e, 'a> =
+    Chain of (('w * 'e) -> ('w * 'e * 'a))
+
 
 /// Implements the chain monad.
 type ChainBuilder () =
+    let unChain a = match a with Chain x -> x
 
     /// Functor map for the chain monad.
     [<DebuggerHidden; DebuggerStepThrough>]
-    member this.Map f (a : 'a) : Chain<'e, 'b, 'w> =
-        Chain (fun world -> (world, Right (f a)))
+    member this.Map f c =
+        let sp = match c with Chain sp -> sp 
+        in Chain (fun (w, e) -> (let output = sp(w, e)
+                                 in match output with  (w_output, e_output, a_output) -> (w_output, e_output, f a_output)))
+        
 
     /// Applicative apply for the chain monad.
-    /// TODO: Implement!
     [<DebuggerHidden; DebuggerStepThrough>]
-    member this.Apply (m : Chain<'e, ('a -> 'b), 'w>) (_ : Chain<'e, 'a, 'w>) : Chain<'e, 'b, 'w> =
-        Chain (fun world ->
-            match (match m with Chain f -> f world) with
-            //                             ^--- NOTE: unbounded recursion here
-            | _ -> failwithnie ())
+    member this.Apply (v1 : Chain<'w, 'e, ('a -> 'b)>) (v2 : Chain<'w, 'e, 'a>) : Chain<'w, 'e, 'b> =
+        let threadWorldThroughAndApply(w, e) = match unChain(v1)(w, e) with (w1_output, e1_output, a1_output) -> (match unChain(v2)(w1_output, e1_output) with (w2_output, e2_output, a2_output) -> (w2_output, e2_output, a1_output a2_output))
+        in Chain threadWorldThroughAndApply
 
-    /// Monadic return for the chain monad.
+    /// Applicative return for the chain monad.
     [<DebuggerHidden; DebuggerStepThrough>]
-    member this.Return (a : 'a) : Chain<'e, 'a, 'w> =
-        Chain (fun world -> (world, Right a))
+    member this.Return a =
+        Chain (fun (w, e) -> (w, e, a))
 
     /// Monadic bind for the chain monad.
     [<DebuggerHidden; DebuggerStepThrough>]
-    member this.Bind (m : Chain<'e, 'a, 'w>, cont : 'a -> Chain<'e, 'b, 'w>) : Chain<'e, 'b, 'w> =
-        Chain (fun world ->
-            match (match m with Chain f -> f world) with
-            //                             ^--- NOTE: unbounded recursion here
-            | (world, Left m) -> (world, Left (fun e -> this.Bind (m e, cont)))
-            | (world, Right v) -> match cont v with Chain f -> f world)
+    member this.Bind (valToGive : Chain<'w, 'e, 'a>, funcToApply : 'a -> Chain<'w, 'e, 'b>) : Chain<'w, 'e, 'b> =
+            let threadWorldThroughAndApply (w : 'w, e : 'e) : ('w * 'e * 'b) = 
+                let (w1_output, e1_output, a1_output) = unChain(valToGive)(w, e)
+                let (Chain func) = funcToApply a1_output
+                func(w1_output, e1_output)
+            Chain threadWorldThroughAndApply
 
 [<AutoOpen>]
 module ChainBuilder =
@@ -63,35 +61,30 @@ module Chain =
     let inline returnM a = chain.Return a
 
     /// Monadic bind for the chain monad.
-    let inline bind m a = chain.Bind (m, a)
+    let inline bind m a = chain.Bind(m, a)
+
+
 
     /// Get the world.
-    let get : Chain<'e, 'w, 'w> =
-        Chain (fun world -> (world, Right world))
+    let get : Chain<'w, 'e, 'w> = Chain (fun (w, e) -> (w, e, w))
 
     /// Get the world as transformed via 'by'.
-    let [<DebuggerHidden; DebuggerStepThrough>] getBy by : Chain<'e, 'a, 'w> =
-        Chain (fun world -> (world, Right (by world)))
+    let getBy (by : 'w -> 'a) : Chain<'w, 'e, 'a> = Chain (fun (w, e) -> (w, e, by w))
 
     /// Set the world.
-    let [<DebuggerHidden; DebuggerStepThrough>] set world : Chain<'e, unit, 'w> =
-        Chain (fun _ -> (world, Right ()))
+    let [<DebuggerHidden; DebuggerStepThrough>] set w : Chain<'w, 'e, unit> = Chain (fun (_, e) -> (w, e, ()))
 
     /// Update the world with an additional transformed world parameter.
-    let [<DebuggerHidden; DebuggerStepThrough>] updateBy by expr : Chain<'e, unit, 'w> =
-        Chain (fun world -> (expr (by world) world, Right ()))
+    let [<DebuggerHidden; DebuggerStepThrough>] updateBy by expr : Chain<'w, 'e, unit> = Chain (fun (w, e) -> (expr (by w) w, e, ()))
 
     /// Update the world.
-    let [<DebuggerHidden; DebuggerStepThrough>] update expr : Chain<'e, unit, 'w> =
-        Chain (fun world -> (expr world, Right ()))
+    let [<DebuggerHidden; DebuggerStepThrough>] update expr : Chain<'w, 'e, unit> = Chain (fun (w, e) -> (expr w, e, ()))
 
     /// Get the next event.
-    let next : Chain<'e, 'e, 'w> =
-        Chain (fun world -> (world, Left returnM))
+    let next : Chain<'w, 'e, 'e> = failwith "Not implemented yet"
 
     /// Pass over the next event.
-    let pass : Chain<'e, unit, 'w> =
-        Chain (fun world -> (world, Left (fun _ -> returnM ())))
+    let pass : Chain<'w, 'e, unit> = failwith "Not implemented yet"
 
     /// React to the next event, using the event's data in the reaction.
     // TODO: See if we can make this acceptable to F#'s type system -
@@ -103,57 +96,31 @@ module Chain =
     //        do! set world }
 
     /// React to the next event, using the event's value in the reaction.
-    let [<DebuggerHidden; DebuggerStepThrough>] reactE expr : Chain<'e, unit, 'w> =
-        chain {
-            let! e = next
-            let! world = get
-            let world = expr e world
-            do! set world }
+    let [<DebuggerHidden; DebuggerStepThrough>] reactE expr : Chain<'e, unit, 'w> = failwith "Not implemented yet"
 
     /// React to the next event, discarding the event's value.
-    let [<DebuggerHidden; DebuggerStepThrough>] react expr : Chain<'e, unit, 'w> =
-        chain {
-            do! pass
-            let! world = get
-            let world = expr world
-            do! set world }
+    let [<DebuggerHidden; DebuggerStepThrough>] react expr : Chain<'e, unit, 'w> = failwith "Not implemented yet"
 
     /// Loop in a chain context while 'pred' evaluate to true.
-    let rec [<DebuggerHidden; DebuggerStepThrough>] loop (i : 'i) (next : 'i -> 'i) (pred : 'i -> 'w -> bool) (m : 'i -> Chain<'e, unit, 'w>) =
-        chain {
-            let! world = get
-            do! if pred i world then
-                    chain {
-                        do! m i
-                        let i = next i
-                        do! loop i next pred m }
-                else returnM () }
+    let rec [<DebuggerHidden; DebuggerStepThrough>] loop (i : 'i) (next : 'i -> 'i) (pred : 'i -> 'w -> bool) (m : 'i -> Chain<'e, unit, 'w>) = failwith "Not implemented yet"
 
     /// Loop in a chain context while 'pred' evaluates to true.
-    let [<DebuggerHidden; DebuggerStepThrough>] during (pred : 'w -> bool) (m : Chain<'e, unit, 'w>) =
-        loop () id (fun _ -> pred) (fun _ -> m)
+    let [<DebuggerHidden; DebuggerStepThrough>] during (pred : 'w -> bool) (m : Chain<'e, unit, 'w>) = failwith "Not implemented yet"
 
     /// Step once into a chain.
-    let [<DebuggerHidden; DebuggerStepThrough>] step (m : Chain<'e, 'a, 'w>) (world : 'w) : 'w * Either<'e -> Chain<'e, 'a, 'w>, 'a> =
-        match m with Chain f -> f world
+    let [<DebuggerHidden; DebuggerStepThrough>] step (m : Chain<'e, 'a, 'w>) (world : 'w) : 'w * Either<'e -> Chain<'e, 'a, 'w>, 'a> = failwith "Not implemented yet"
 
     /// Advance a chain value by one step, providing 'e'.
-    let [<DebuggerHidden; DebuggerStepThrough>] advance (m : 'e -> Chain<'e, 'a, 'w>) (e : 'e) (world : 'w) : 'w * Either<'e -> Chain<'e, 'a, 'w>, 'a> =
-        step (m e) world
+    let [<DebuggerHidden; DebuggerStepThrough>] advance (m : 'e -> Chain<'e, 'a, 'w>) (e : 'e) (world : 'w) : 'w * Either<'e -> Chain<'e, 'a, 'w>, 'a> = failwith "Not implemented yet"
 
     /// Run a chain to its end, providing 'e' for all its steps.
-    let rec [<DebuggerHidden; DebuggerStepThrough>] run3 (m : Chain<'e, 'a, 'w>) (e : 'e) (world : 'w) : ('w * 'a) =
-        match step m world with
-        | (world', Left m') -> run3 (m' e) e world'
-        | (world', Right v) -> (world', v)
+    let rec [<DebuggerHidden; DebuggerStepThrough>] run3 (m : Chain<'e, 'a, 'w>) (e : 'e) (world : 'w) : ('w * 'a) = failwith "Not implemented yet"
 
     /// Run a chain to its end, providing unit for all its steps.
-    let [<DebuggerHidden; DebuggerStepThrough>] run2 (m : Chain<unit, 'a, 'w>) (world : 'w) : ('w * 'a) =
-        run3 m () world
+    let [<DebuggerHidden; DebuggerStepThrough>] run2 (m : Chain<unit, 'a, 'w>) (world : 'w) : ('w * 'a) = failwith "Not implemented yet"
 
     /// Run a chain to its end, providing unit for all its steps.
-    let [<DebuggerHidden; DebuggerStepThrough>] run (m : Chain<unit, 'a, 'w>) (world : 'w) : 'w =
-        run2 m world |> fst
+    let [<DebuggerHidden; DebuggerStepThrough>] run (m : Chain<unit, 'a, 'w>) (world : 'w) : 'w = failwith "Not implemented yet"
 
     let private run4 handling (chain : Chain<Event<'a, Participant>, unit, 'w>) (stream : Stream<'a, 'w>) (world : 'w) =
         let globalParticipant = EventSystem.getGlobalParticipantGeneralized world
@@ -181,11 +148,9 @@ module Chain =
     /// Run a chain over Prime's event system.
     /// Allows each chainhronized operation to run without referencing its source event, and
     /// without specifying its event handling approach by assuming Cascade.
-    let runAssumingCascade chain (stream : Stream<'a, 'w>) world =
-        run4 Cascade chain stream world
+    let runAssumingCascade chain (stream : Stream<'a, 'w>) world = failwith "Not implemented yet"
 
     /// Run a chain over Prime's event system.
     /// Allows each chainhronized operation to run without referencing its source event, and
     /// without specifying its event handling approach by assuming Resolve.
-    let runAssumingResolve chain (stream : Stream<'a, 'w>) world =
-        run4 Resolve chain stream world
+    let runAssumingResolve chain (stream : Stream<'a, 'w>) world = failwith "Not implemented yet"
