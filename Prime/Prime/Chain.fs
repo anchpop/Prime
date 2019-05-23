@@ -5,6 +5,10 @@ namespace Prime
 open System.Diagnostics
 open Prime
 
+
+type [<NoComparison; NoEquality>] EventCont<'e> =
+    EventCont of List<'e> * (Unit -> ('e * EventCont<'e>))
+
 /// The Chain monad - Essentially the State monad, will provide a restricted interface to keep everything safe.
 type [<NoComparison; NoEquality>] Chain<'w, 'e, 'a> =
     Chain of (('w * 'e) -> ('w * 'e * 'a))
@@ -35,8 +39,8 @@ type ChainBuilder () =
 
     /// Monadic bind for the chain monad.
     [<DebuggerHidden; DebuggerStepThrough>]
-    member this.Bind (valToGive : Chain<'w, 'e, 'a>, funcToApply : 'a -> Chain<'w, 'e, 'b>) : Chain<'w, 'e, 'b> =
-            let threadWorldThroughAndApply (w : 'w, e : 'e) : ('w * 'e * 'b) = 
+    member this.Bind (valToGive : Chain<'w, EventCont<'e>, 'a>, funcToApply : 'a -> Chain<'w, EventCont<'e>, 'b>) : Chain<'w, EventCont<'e>, 'b> =
+            let threadWorldThroughAndApply (w : 'w, e : EventCont<'e>) : ('w * EventCont<'e> * 'b) = 
                 let (w1_output, e1_output, a1_output) = unChain(valToGive)(w, e)
                 let (Chain func) = funcToApply a1_output
                 func(w1_output, e1_output)
@@ -81,10 +85,16 @@ module Chain =
     let [<DebuggerHidden; DebuggerStepThrough>] update expr : Chain<'w, 'e, unit> = Chain (fun (w, e) -> (expr w, e, ()))
 
     /// Get the next event.
-    let next : Chain<'w, 'e, 'e> = failwith "Not implemented yet"
+    let next : Chain<'w, EventCont<'e>, 'e> = Chain (fun (w, e) -> match e with EventCont (eventList, oldEventCont) -> (match eventList with 
+                                                                                                                        | firstEvent::rest -> (w, EventCont(rest, oldEventCont), firstEvent)
+                                                                                                                        | _                -> (match oldEventCont() with (newEvent, EventCont(eventList, eventCont)) ->  (w, EventCont(eventList, eventCont), newEvent))))
 
     /// Pass over the next event.
-    let pass : Chain<'w, 'e, unit> = failwith "Not implemented yet"
+    let pass : Chain<'w, EventCont<'e>, unit> = Chain (fun (w, e) -> match e with EventCont (eventList, oldEventCont) -> (match eventList with 
+                                                                     | _::rest -> (w, EventCont(rest, oldEventCont), () )
+                                                                     | _       -> (match oldEventCont() with (_, EventCont(eventList, eventCont)) ->  (w, EventCont(eventList, eventCont), () ))))
+
+
 
     /// React to the next event, using the event's data in the reaction.
     // TODO: See if we can make this acceptable to F#'s type system -
